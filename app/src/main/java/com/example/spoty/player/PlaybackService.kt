@@ -9,6 +9,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 
+// Сервис, который держит музыку живой в фоне и рисует уведомление в шторке.
 @OptIn(UnstableApi::class)
 class PlaybackService : MediaSessionService() {
 
@@ -18,11 +19,12 @@ class PlaybackService : MediaSessionService() {
         super.onCreate()
         val exoPlayer = ExoPlayer.Builder(this).build()
 
+        // Обманка для системы: говорим, что кнопки next/prev ВСЕГДА доступны.
+        // Иначе Android может их скрыть в шторке, если очередь кончилась.
         val forwardingPlayer = object : ForwardingPlayer(exoPlayer) {
             override fun getAvailableCommands(): Player.Commands {
-                val commands = super.getAvailableCommands()
                 return Player.Commands.Builder()
-                    .addAll(commands)
+                    .addAll(super.getAvailableCommands())
                     .add(Player.COMMAND_SEEK_TO_NEXT)
                     .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
                     .add(Player.COMMAND_SEEK_TO_PREVIOUS)
@@ -34,10 +36,10 @@ class PlaybackService : MediaSessionService() {
         mediaSession = MediaSession.Builder(this, forwardingPlayer).build()
     }
 
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
-        return mediaSession
-    }
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo) = mediaSession
 
+    // Вызывается, когда юзер свайпнул приложение из недавних.
+    // Именно тут музыка останавливается.
     override fun onTaskRemoved(rootIntent: Intent?) {
         mediaSession?.player?.run {
             if (playWhenReady) pause()

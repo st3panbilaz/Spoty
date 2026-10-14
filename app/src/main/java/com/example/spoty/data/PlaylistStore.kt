@@ -5,91 +5,67 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
+// Модель плейлиста: id, имя и список id треков (сами треки хранить не нужно).
 data class Playlist(
     val id: String,
     val name: String,
     val songIds: List<Long>
 )
 
+// Простое хранилище плейлистов в SharedPreferences. Формат — JSON-строка.
+// Для большого количества плейлистов стоит перейти на Room, но пока хватает.
 object PlaylistStore {
 
     private const val PREFS_NAME = "spoty_prefs"
     private const val KEY_PLAYLISTS = "playlists"
 
     fun load(context: Context): List<Playlist> {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val raw = prefs.getString(KEY_PLAYLISTS, null) ?: return emptyList()
+        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_PLAYLISTS, null) ?: return emptyList()
         return try {
             val arr = JSONArray(raw)
-            val result = mutableListOf<Playlist>()
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                val idsArr = obj.getJSONArray("songIds")
-                val ids = mutableListOf<Long>()
-                for (j in 0 until idsArr.length()) ids.add(idsArr.getLong(j))
-                result.add(
-                    Playlist(
-                        id = obj.getString("id"),
-                        name = obj.getString("name"),
-                        songIds = ids
-                    )
+            List(arr.length()) { i ->
+                val o = arr.getJSONObject(i)
+                val ids = o.getJSONArray("songIds")
+                Playlist(
+                    id = o.getString("id"),
+                    name = o.getString("name"),
+                    songIds = List(ids.length()) { j -> ids.getLong(j) }
                 )
             }
-            result
-        } catch (e: Exception) {
-            emptyList()
-        }
+        } catch (e: Exception) { emptyList() }
     }
 
     fun save(context: Context, playlists: List<Playlist>) {
         val arr = JSONArray()
-        for (p in playlists) {
-            val obj = JSONObject()
-            obj.put("id", p.id)
-            obj.put("name", p.name)
-            val idsArr = JSONArray()
-            for (id in p.songIds) idsArr.put(id)
-            obj.put("songIds", idsArr)
-            arr.put(obj)
+        playlists.forEach { p ->
+            arr.put(JSONObject().apply {
+                put("id", p.id)
+                put("name", p.name)
+                put("songIds", JSONArray().apply { p.songIds.forEach { put(it) } })
+            })
         }
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        prefs.edit().putString(KEY_PLAYLISTS, arr.toString()).apply()
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putString(KEY_PLAYLISTS, arr.toString()).apply()
     }
 
-    fun create(context: Context, name: String): List<Playlist> {
-        val current = load(context).toMutableList()
-        current.add(
-            Playlist(
-                id = UUID.randomUUID().toString(),
-                name = name,
-                songIds = emptyList()
-            )
-        )
-        save(context, current)
-        return current
-    }
+    fun create(context: Context, name: String): List<Playlist> =
+        (load(context) + Playlist(UUID.randomUUID().toString(), name, emptyList()))
+            .also { save(context, it) }
 
-    fun delete(context: Context, playlistId: String): List<Playlist> {
-        val current = load(context).filterNot { it.id == playlistId }
-        save(context, current)
-        return current
-    }
+    fun delete(context: Context, id: String): List<Playlist> =
+        load(context).filterNot { it.id == id }.also { save(context, it) }
 
+    // Добавляет трек в плейлист или убирает его, если уже есть.
     fun toggleSong(context: Context, playlistId: String, songId: Long): List<Playlist> {
-        val current = load(context).toMutableList()
-        val idx = current.indexOfFirst { it.id == playlistId }
-        if (idx == -1) return current
-
-        val playlist = current[idx]
-        val newIds = playlist.songIds.toMutableList()
-        if (newIds.contains(songId)) newIds.remove(songId) else newIds.add(songId)
-        current[idx] = playlist.copy(songIds = newIds)
-        save(context, current)
-        return current
-    }
-
-    fun isSongInPlaylist(context: Context, playlistId: String, songId: Long): Boolean {
-        val p = load(context).firstOrNull { it.id == playlistId } ?: return false
-        return p.songIds.contains(songId)
+        val all = load(context).toMutableList()
+        val idx = all.indexOfFirst { it.id == playlistId }
+        if (idx == -1) return all
+        val p = all[idx]
+        val newIds = p.songIds.toMutableList()
+        if (!newIds.remove(songId)) newIds.add(songId)
+        all[idx] = p.copy(songIds = newIds)
+        save(context, all)
+        return all
     }
 }

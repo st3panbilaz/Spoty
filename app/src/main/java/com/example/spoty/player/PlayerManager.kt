@@ -9,18 +9,19 @@ import androidx.media3.session.SessionToken
 import com.example.spoty.data.Song
 import com.google.common.util.concurrent.MoreExecutors
 
+// Мостик между UI и сервисом. Раньше тут был ExoPlayer, теперь — MediaController.
 class PlayerManager(context: Context) {
 
     private var mediaController: MediaController? = null
 
     var currentSong: Song? = null
 
-    // Переименовано, чтобы не конфликтовать с методом setShuffle()
+    // Имена без "is"/"set" — иначе конфликт с методами setShuffle/setRepeatMode.
     var shuffleEnabled: Boolean = false
-
-    // Переименовано, чтобы не конфликтовать с методом setRepeatMode()
     var currentRepeatMode: Int = REPEAT_ALL
 
+    // Колбэки наружу: сюда MainActivity подписывается, чтобы обновлять UI,
+    // когда трек меняется из шторки.
     var onSongChanged: ((Song?) -> Unit)? = null
     var onPlayingChanged: ((Boolean) -> Unit)? = null
     var queueProvider: (() -> List<Song>)? = null
@@ -31,34 +32,31 @@ class PlayerManager(context: Context) {
         const val REPEAT_ONE = 2
     }
 
+    // Ловим события плеера: переключение трека и play/pause.
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-            val idStr = mediaItem?.mediaId ?: return
-            val id = idStr.toLongOrNull() ?: return
-            val song = queueProvider?.invoke()?.firstOrNull { it.id == id }
-            if (song != null) {
-                currentSong = song
-                onSongChanged?.invoke(song)
-            }
+            val id = mediaItem?.mediaId?.toLongOrNull() ?: return
+            val song = queueProvider?.invoke()?.firstOrNull { it.id == id } ?: return
+            currentSong = song
+            onSongChanged?.invoke(song)
         }
-
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             onPlayingChanged?.invoke(isPlaying)
         }
     }
 
     init {
-        val sessionToken = SessionToken(
-            context,
-            ComponentName(context, PlaybackService::class.java)
-        )
-        val future = MediaController.Builder(context, sessionToken).buildAsync()
-        future.addListener({
-            mediaController = future.get()
-            mediaController?.addListener(listener)
-            mediaController?.shuffleModeEnabled = shuffleEnabled
-            mediaController?.repeatMode = mapRepeat(currentRepeatMode)
-        }, MoreExecutors.directExecutor())
+        // Подключаемся к сервису — асинхронно.
+        val sessionToken = SessionToken(context, ComponentName(context, PlaybackService::class.java))
+        MediaController.Builder(context, sessionToken).buildAsync().also { future ->
+            future.addListener({
+                mediaController = future.get()
+                mediaController?.addListener(listener)
+                // Сразу применяем то, что было выставлено в UI.
+                mediaController?.shuffleModeEnabled = shuffleEnabled
+                mediaController?.repeatMode = mapRepeat(currentRepeatMode)
+            }, MoreExecutors.directExecutor())
+        }
     }
 
     fun setShuffle(enabled: Boolean) {
@@ -71,28 +69,24 @@ class PlayerManager(context: Context) {
         mediaController?.repeatMode = mapRepeat(mode)
     }
 
-    private fun mapRepeat(mode: Int): Int = when (mode) {
+    private fun mapRepeat(mode: Int) = when (mode) {
         REPEAT_OFF -> Player.REPEAT_MODE_OFF
         REPEAT_ALL -> Player.REPEAT_MODE_ALL
         REPEAT_ONE -> Player.REPEAT_MODE_ONE
         else -> Player.REPEAT_MODE_ALL
     }
 
+    // Главный метод: кладём в плеер ВСЮ очередь. Тогда next/prev работают сами,
+    // и из приложения, и из шторки. mediaId нужен для синхронизации UI.
     fun playQueue(queue: List<Song>, startSong: Song) {
         currentSong = startSong
-        val mediaItems = queue.map { song ->
-            val uri = if (song.path.startsWith("content://")) song.path
-            else "file://${song.path}"
-            MediaItem.Builder()
-                .setUri(uri)
-                .setMediaId(song.id.toString())
-                .build()
+        val items = queue.map { song ->
+            val uri = if (song.path.startsWith("content://")) song.path else "file://${song.path}"
+            MediaItem.Builder().setUri(uri).setMediaId(song.id.toString()).build()
         }
-        val startIndex = queue.indexOfFirst { it.id == startSong.id }
-            .coerceAtLeast(0)
-
+        val startIndex = queue.indexOfFirst { it.id == startSong.id }.coerceAtLeast(0)
         mediaController?.apply {
-            setMediaItems(mediaItems, startIndex, 0L)
+            setMediaItems(items, startIndex, 0L)
             shuffleModeEnabled = shuffleEnabled
             repeatMode = mapRepeat(currentRepeatMode)
             prepare()
@@ -100,73 +94,57 @@ class PlayerManager(context: Context) {
         }
     }
 
+    // Одиночный трек — на всякий случай.
     fun playSong(song: Song) {
         currentSong = song
-        val uri = if (song.path.startsWith("content://")) song.path
-        else "file://${song.path}"
-        val mediaItem = MediaItem.fromUri(uri)
+        val uri = if (song.path.startsWith("content://")) song.path else "file://${song.path}"
         mediaController?.apply {
-            setMediaItem(mediaItem)
+            setMediaItem(MediaItem.fromUri(uri))
             prepare()
             play()
         }
     }
 
     fun togglePlayPause() {
-        mediaController?.let {
-            if (it.isPlaying) it.pause() else it.play()
-        }
+        mediaController?.let { if (it.isPlaying) it.pause() else it.play() }
     }
 
-    fun isPlaying(): Boolean = mediaController?.isPlaying ?: false
-
-    fun seekTo(positionMs: Long) { mediaController?.seekTo(positionMs) }
-
-    fun getCurrentPosition(): Long = mediaController?.currentPosition ?: 0L
-
-    fun getDuration(): Long {
-        val d = mediaController?.duration ?: 0L
-        return if (d > 0) d else 0L
-    }
-
+    fun isPlaying() = mediaController?.isPlaying ?: false
+    fun seekTo(ms: Long) { mediaController?.seekTo(ms) }
+    fun getCurrentPosition() = mediaController?.currentPosition ?: 0L
+    fun getDuration() = mediaController?.duration?.takeIf { it > 0 } ?: 0L
     fun skipToNext() { mediaController?.seekToNextMediaItem() }
     fun skipToPrevious() { mediaController?.seekToPreviousMediaItem() }
 
-    fun nextSong(allSongs: List<Song>): Song? {
-        if (allSongs.isEmpty()) return null
-        if (shuffleEnabled) return allSongs.random()
-        val current = currentSong ?: return allSongs.firstOrNull()
-        val idx = allSongs.indexOfFirst { it.id == current.id }
-        if (idx == -1) return allSongs.firstOrNull()
-        return allSongs[(idx + 1) % allSongs.size]
+    fun nextSong(list: List<Song>): Song? {
+        if (list.isEmpty()) return null
+        if (shuffleEnabled) return list.random()
+        val cur = currentSong ?: return list.firstOrNull()
+        val i = list.indexOfFirst { it.id == cur.id }
+        if (i == -1) return list.firstOrNull()
+        return list[(i + 1) % list.size]
     }
 
-    fun previousSong(allSongs: List<Song>): Song? {
-        if (allSongs.isEmpty()) return null
-        if (shuffleEnabled) return allSongs.random()
-        val current = currentSong ?: return allSongs.firstOrNull()
-        val idx = allSongs.indexOfFirst { it.id == current.id }
-        if (idx == -1) return allSongs.firstOrNull()
-        return allSongs[(idx - 1 + allSongs.size) % allSongs.size]
+    fun previousSong(list: List<Song>): Song? {
+        if (list.isEmpty()) return null
+        if (shuffleEnabled) return list.random()
+        val cur = currentSong ?: return list.firstOrNull()
+        val i = list.indexOfFirst { it.id == cur.id }
+        if (i == -1) return list.firstOrNull()
+        return list[(i - 1 + list.size) % list.size]
     }
 
-    fun songForAutoAdvance(allSongs: List<Song>): Song? {
-        if (allSongs.isEmpty()) return null
+    fun songForAutoAdvance(list: List<Song>): Song? {
+        if (list.isEmpty()) return null
         if (currentRepeatMode == REPEAT_ONE) return currentSong
-        if (shuffleEnabled) return allSongs.random()
-        val current = currentSong ?: return allSongs.firstOrNull()
-        val idx = allSongs.indexOfFirst { it.id == current.id }
-        if (idx == -1) return allSongs.firstOrNull()
-        val isLast = idx == allSongs.size - 1
-        return if (isLast) {
-            if (currentRepeatMode == REPEAT_ALL) allSongs.first() else null
-        } else {
-            allSongs[idx + 1]
-        }
+        if (shuffleEnabled) return list.random()
+        val cur = currentSong ?: return list.firstOrNull()
+        val i = list.indexOfFirst { it.id == cur.id }
+        if (i == -1) return list.firstOrNull()
+        return if (i == list.size - 1) {
+            if (currentRepeatMode == REPEAT_ALL) list.first() else null
+        } else list[i + 1]
     }
-
-    fun setListener(l: Player.Listener) { mediaController?.addListener(l) }
-    fun removeListener(l: Player.Listener) { mediaController?.removeListener(l) }
 
     fun release() {
         mediaController?.removeListener(listener)

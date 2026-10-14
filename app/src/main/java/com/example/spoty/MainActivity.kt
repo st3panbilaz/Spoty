@@ -90,6 +90,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             val context = this
+            // Тема хранится в SharedPreferences, читаем при старте.
             var isDark by remember { mutableStateOf(ThemeStore.isDark(context)) }
             SpotyTheme(darkTheme = isDark) {
                 Surface(
@@ -110,7 +111,7 @@ class MainActivity : ComponentActivity() {
 }
 
 // ============================================================
-// КОРНЕВОЙ КОМПОНЕНТ
+// КОРНЕВОЙ КОМПОНЕНТ (всё состояние приложения тут)
 // ============================================================
 @Composable
 fun AppRoot(
@@ -120,6 +121,8 @@ fun AppRoot(
     val context = LocalContext.current
     val colors = LocalSpotyColors.current
 
+    // Плеер и громкость живут на уровне AppRoot, чтобы не сбрасываться
+    // при переключении вкладок.
     val playerManager = remember { PlayerManager(context) }
     val volumeController = remember { VolumeController(context) }
 
@@ -127,6 +130,7 @@ fun AppRoot(
         onDispose { playerManager.release() }
     }
 
+    // --- Состояния ---
     var songs by remember { mutableStateOf<List<Song>>(emptyList()) }
     var hasPermission by remember { mutableStateOf(false) }
 
@@ -142,9 +146,16 @@ fun AppRoot(
     var showVolumeSlider by remember { mutableStateOf(ThemeStore.isShowVolume(context)) }
 
     var playlists by remember { mutableStateOf(PlaylistStore.load(context)) }
+
+    // Очередь воспроизведения — какой список сейчас играет (вся библиотека или плейлист).
+    // Нужна для next/prev и для поиска песни по mediaId из шторки.
     var playbackQueue by remember { mutableStateOf<List<Song>>(emptyList()) }
+
+    // Какой трек сейчас показывать в BottomSheet «в плейлист».
     var sheetSong by remember { mutableStateOf<Song?>(null) }
 
+    // Раз в 300 мс читаем системную громкость — чтобы ползунок двигался,
+    // если юзер нажал физические кнопки.
     LaunchedEffect(Unit) {
         while (true) {
             val v = volumeController.getCurrentVolume()
@@ -159,19 +170,16 @@ fun AppRoot(
 
     var selectedTab by remember { mutableIntStateOf(0) }
 
-    // Обновлённые строки: setShuffle / setRepeatMode
+    // Синхронизация флагов с ExoPlayer (shuffle и repeat уходят внутрь плеера).
     LaunchedEffect(isShuffle) { playerManager.setShuffle(isShuffle) }
     LaunchedEffect(repeatMode) { playerManager.setRepeatMode(repeatMode) }
 
-    // Синхронизация с плеером через колбэки PlayerManager
+    // Подписка на события PlayerManager: сюда прилетают изменения,
+    // сделанные из шторки. Это ключевой момент синхронизации UI ↔ шторка.
     DisposableEffect(Unit) {
         playerManager.queueProvider = { playbackQueue }
-        playerManager.onSongChanged = { song ->
-            if (song != null) currentSong = song
-        }
-        playerManager.onPlayingChanged = { playing ->
-            isPlaying = playing
-        }
+        playerManager.onSongChanged = { song -> if (song != null) currentSong = song }
+        playerManager.onPlayingChanged = { playing -> isPlaying = playing }
         onDispose {
             playerManager.queueProvider = null
             playerManager.onSongChanged = null
@@ -179,6 +187,7 @@ fun AppRoot(
         }
     }
 
+    // --- Разрешения ---
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -186,11 +195,13 @@ fun AppRoot(
         if (granted) songs = MusicScanner.scanAllSongs(context)
     }
 
+    // Выбор папки через системный диалог.
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         if (uri != null) {
             try {
+                // Persistable — чтобы доступ к папке сохранился после перезапуска.
                 context.contentResolver.takePersistableUriPermission(
                     uri,
                     Intent.FLAG_GRANT_READ_URI_PERMISSION
@@ -202,6 +213,7 @@ fun AppRoot(
         }
     }
 
+    // При первом запуске запрашиваем разрешение на аудио.
     LaunchedEffect(Unit) {
         val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
             Manifest.permission.READ_MEDIA_AUDIO
@@ -218,6 +230,7 @@ fun AppRoot(
         }
     }
 
+    // Обновляем позицию трека каждые 500 мс, пока что-то играет.
     LaunchedEffect(currentSong, isPlaying) {
         while (currentSong != null) {
             if (!isSeeking) {
@@ -228,7 +241,9 @@ fun AppRoot(
         }
     }
 
+    // --- Хелперы ---
     fun playNext() {
+        // Если есть очередь — пусть ExoPlayer сам переключит (учитывая shuffle/repeat).
         if (playbackQueue.isNotEmpty()) {
             playerManager.skipToNext()
         } else {
@@ -248,6 +263,7 @@ fun AppRoot(
             isPlaying = true
         }
     }
+    // Запуск трека из всей библиотеки — очередь = весь список.
     fun playSongFromAll(song: Song) {
         playbackQueue = songs
         playerManager.playQueue(songs, song)
@@ -255,6 +271,7 @@ fun AppRoot(
         isPlaying = true
         showFullPlayer = true
     }
+    // Запуск трека из плейлиста — очередь = треки плейлиста.
     fun playSongFromPlaylist(queue: List<Song>, song: Song) {
         playbackQueue = queue
         playerManager.playQueue(queue, song)
@@ -263,20 +280,22 @@ fun AppRoot(
         showFullPlayer = true
     }
 
+    // ========================================================
+    // UI
+    // ========================================================
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             containerColor = colors.background,
             bottomBar = {
                 Column {
+                    // Мини-плеер над навигацией — виден на всех вкладках.
                     currentSong?.let { song ->
                         MiniPlayer(
                             song = song,
                             isPlaying = isPlaying,
                             onClick = { showFullPlayer = true },
                             onSwipeUp = { showFullPlayer = true },
-                            onTogglePlay = {
-                                playerManager.togglePlayPause()
-                            }
+                            onTogglePlay = { playerManager.togglePlayPause() }
                         )
                     }
 
@@ -330,6 +349,7 @@ fun AppRoot(
                         onPickFolder = { folderPickerLauncher.launch(null) },
                         onSongClick = { playSongFromAll(it) },
                         onDeleteSong = { song ->
+                            // Удаление только из UI. Файл на телефоне остаётся.
                             songs = songs.filterNot { it.id == song.id }
                             if (currentSong?.id == song.id) {
                                 playerManager.release()
@@ -349,15 +369,9 @@ fun AppRoot(
                     2 -> PlaylistsScreen(
                         songs = songs,
                         playlists = playlists,
-                        onCreate = { name ->
-                            playlists = PlaylistStore.create(context, name)
-                        },
-                        onDelete = { id ->
-                            playlists = PlaylistStore.delete(context, id)
-                        },
-                        onPlayPlaylistSong = { queue, song ->
-                            playSongFromPlaylist(queue, song)
-                        },
+                        onCreate = { name -> playlists = PlaylistStore.create(context, name) },
+                        onDelete = { id -> playlists = PlaylistStore.delete(context, id) },
+                        onPlayPlaylistSong = { queue, song -> playSongFromPlaylist(queue, song) },
                         onRemoveSong = { playlistId, songId ->
                             playlists = PlaylistStore.toggleSong(context, playlistId, songId)
                         }
@@ -393,6 +407,7 @@ fun AppRoot(
             }
         }
 
+        // Полноэкранный плеер выезжает снизу поверх всего.
         AnimatedVisibility(
             visible = showFullPlayer,
             enter = slideInVertically(initialOffsetY = { it }),
@@ -410,9 +425,7 @@ fun AppRoot(
                     repeatMode = repeatMode,
                     showVolumeSlider = showVolumeSlider,
                     onClose = { showFullPlayer = false },
-                    onTogglePlay = {
-                        playerManager.togglePlayPause()
-                    },
+                    onTogglePlay = { playerManager.togglePlayPause() },
                     onNext = { playNext() },
                     onPrevious = { playPrevious() },
                     onToggleShuffle = { isShuffle = !isShuffle },
@@ -437,6 +450,7 @@ fun AppRoot(
             }
         }
 
+        // BottomSheet «Добавить в плейлист», вызывается плюсиком.
         sheetSong?.let { song ->
             AddToPlaylistSheet(
                 song = song,
@@ -461,7 +475,7 @@ private fun navItemColors() = NavigationBarItemDefaults.colors(
 )
 
 // ============================================================
-// ГЛАВНАЯ
+// ГЛАВНАЯ — список всех песен
 // ============================================================
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -487,6 +501,8 @@ fun HomeScreen(
             .padding(horizontal = 16.dp)
     ) {
         Spacer(Modifier.height(8.dp))
+
+        // Шапка: заголовок и кнопка "+" (сканирование)
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -503,6 +519,7 @@ fun HomeScreen(
             }
         }
 
+        // Выпадающее меню "Сканировать / Выбрать папку"
         AnimatedVisibility(visible = showAddMenu) {
             Column(
                 modifier = Modifier
@@ -563,7 +580,7 @@ fun HomeScreen(
 }
 
 // ============================================================
-// BOTTOM SHEET «ДОБАВИТЬ В ПЛЕЙЛИСТ»
+// BOTTOM SHEET "ДОБАВИТЬ В ПЛЕЙЛИСТ"
 // ============================================================
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -636,6 +653,7 @@ fun AddToPlaylistSheet(
                                 Text(p.name, color = colors.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
                                 Text("${p.songIds.size} треков", color = colors.textHint, fontSize = 12.sp)
                             }
+                            // Галочка — если трек уже в этом плейлисте.
                             if (isIn) {
                                 Icon(
                                     Icons.Filled.Check,
@@ -663,6 +681,7 @@ fun SearchScreen(
     val colors = LocalSpotyColors.current
     var query by remember { mutableStateOf("") }
 
+    // Фильтрация идёт по трём полям сразу.
     val filtered = remember(query, songs) {
         if (query.isBlank()) songs
         else songs.filter {
@@ -720,7 +739,7 @@ fun SearchScreen(
 }
 
 // ============================================================
-// ПЛЕЙЛИСТЫ
+// ПЛЕЙЛИСТЫ — список + полноэкранная деталь
 // ============================================================
 @Composable
 fun PlaylistsScreen(
@@ -736,6 +755,7 @@ fun PlaylistsScreen(
     var newName by remember { mutableStateOf("") }
     var openedPlaylistId by remember { mutableStateOf<String?>(null) }
 
+    // Если плейлист открыт — показываем его полноэкранно и выходим из функции.
     val openedPlaylist = openedPlaylistId?.let { id -> playlists.firstOrNull { it.id == id } }
     if (openedPlaylist != null) {
         val playlistSongs = songs.filter { openedPlaylist.songIds.contains(it.id) }
@@ -792,6 +812,7 @@ fun PlaylistsScreen(
         }
     }
 
+    // Диалог создания плейлиста.
     if (showCreateDialog) {
         AlertDialog(
             onDismissRequest = { showCreateDialog = false },
@@ -831,7 +852,7 @@ fun PlaylistsScreen(
 }
 
 // ============================================================
-// СВАЙП-СТРОКА ПЛЕЙЛИСТА
+// СВАЙП-СТРОКА ПЛЕЙЛИСТА (в общем списке)
 // ============================================================
 @Composable
 fun SwipeablePlaylistRow(
@@ -844,12 +865,14 @@ fun SwipeablePlaylistRow(
     val openWidthDp = 80.dp
     val openWidthPx = with(density) { openWidthDp.toPx() }
 
+    // offsetX — насколько строка сдвинута влево. 0 = закрыта, -80dp = открыта.
     val offsetX = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
     val isOpen by remember { derivedStateOf { offsetX.value < -openWidthPx / 2f } }
 
     val dragState = rememberDraggableState { delta ->
         scope.launch {
+            // Ограничиваем сдвиг диапазоном [-openWidthPx, 0].
             val newValue = (offsetX.value + delta).coerceIn(-openWidthPx, 0f)
             offsetX.snapTo(newValue)
         }
@@ -860,6 +883,7 @@ fun SwipeablePlaylistRow(
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.medium)
     ) {
+        // Красный фон с корзиной — виден, когда строка сдвинута.
         Row(
             modifier = Modifier
                 .matchParentSize()
@@ -886,6 +910,7 @@ fun SwipeablePlaylistRow(
             }
         }
 
+        // Сама строка плейлиста, которая сдвигается.
         Box(
             modifier = Modifier
                 .offset { IntOffset(offsetX.value.toInt(), 0) }
@@ -894,6 +919,8 @@ fun SwipeablePlaylistRow(
                     orientation = Orientation.Horizontal,
                     onDragStopped = {
                         scope.launch {
+                            // "Прилипаем" к крайнему положению в зависимости от того,
+                            // куда сдвинули — за половину или нет.
                             if (offsetX.value < -openWidthPx / 2f) {
                                 offsetX.animateTo(-openWidthPx)
                             } else {
@@ -904,6 +931,7 @@ fun SwipeablePlaylistRow(
                 )
                 .clickable {
                     if (isOpen) {
+                        // Если открыта — тап закрывает.
                         scope.launch { offsetX.animateTo(0f) }
                     } else {
                         onClick()
@@ -1000,6 +1028,7 @@ fun PlaylistDetailScreen(
     }
 }
 
+// Свайп-строка трека внутри плейлиста — свайп влево убирает трек.
 @Composable
 fun SwipeableRemoveSongRow(
     song: Song,
@@ -1125,6 +1154,7 @@ fun SettingsScreen(
     ) {
         Spacer(Modifier.height(16.dp))
 
+        // Шапка: иконка + подпись по центру.
         Column(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally
@@ -1141,11 +1171,13 @@ fun SettingsScreen(
 
         Spacer(Modifier.height(20.dp))
 
+        // Тумблеры.
         SettingsToggleRow("Тёмная тема", isDark, onToggleTheme)
         SettingsToggleRow("Показывать ползунок громкости", showVolumeSlider, onToggleVolumeSlider)
 
         Spacer(Modifier.height(8.dp))
 
+        // Действия.
         SettingsRow("Сканировать телефон", Icons.Filled.Search) { onScan() }
         SettingsRow("Выбрать папку вручную", Icons.Filled.Folder) { onPickFolder() }
         SettingsRow("Очистить плейлист", Icons.Filled.Delete) { showClearList = true }
@@ -1301,6 +1333,7 @@ fun CenteredText(text: String) {
     }
 }
 
+// Асинхронно загружает обложку и запоминает её по albumId.
 @Composable
 fun rememberAlbumArt(albumId: Long): Bitmap? {
     val context = LocalContext.current
@@ -1377,6 +1410,7 @@ fun SimpleSongRow(song: Song, onClick: () -> Unit) {
     }
 }
 
+// Свайп-строка с ДВУМЯ кнопками: плюсик (в плейлист) и корзина (удалить).
 @Composable
 fun SwipeableSongRow(
     song: Song,
@@ -1411,6 +1445,7 @@ fun SwipeableSongRow(
             horizontalArrangement = Arrangement.End,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // Серая кнопка с плюсиком — добавление в плейлист.
             Box(
                 modifier = Modifier
                     .width(buttonWidthDp)
@@ -1429,6 +1464,7 @@ fun SwipeableSongRow(
                     modifier = Modifier.size(26.dp)
                 )
             }
+            // Красная кнопка с корзиной — удаление.
             Box(
                 modifier = Modifier
                     .width(buttonWidthDp)
@@ -1449,6 +1485,7 @@ fun SwipeableSongRow(
             }
         }
 
+        // Сама строка, которая сдвигается.
         Box(
             modifier = Modifier
                 .offset { IntOffset(offsetX.value.toInt(), 0) }
@@ -1479,7 +1516,7 @@ fun SwipeableSongRow(
 }
 
 // ============================================================
-// МИНИ-ПЛЕЕР
+// МИНИ-ПЛЕЕР (над нижней навигацией, на всех вкладках)
 // ============================================================
 @Composable
 fun MiniPlayer(
@@ -1490,6 +1527,7 @@ fun MiniPlayer(
     onTogglePlay: () -> Unit
 ) {
     val colors = LocalSpotyColors.current
+    // Свайп вверх по мини-плееру открывает полный плеер.
     val dragState = rememberDraggableState { delta ->
         if (delta < -30f) onSwipeUp()
     }
@@ -1549,6 +1587,7 @@ fun PlayerScreen(
     onAddToPlaylist: (Song) -> Unit
 ) {
     val colors = LocalSpotyColors.current
+    // Свайп вниз закрывает полный плеер.
     val dragState = rememberDraggableState { delta ->
         if (delta > 30f) onClose()
     }
@@ -1564,6 +1603,7 @@ fun PlayerScreen(
     ) {
         Spacer(Modifier.height(16.dp))
 
+        // Верхняя панель: стрелка вниз + заголовок.
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
@@ -1579,6 +1619,7 @@ fun PlayerScreen(
 
         Spacer(Modifier.height(24.dp))
 
+        // Большая обложка.
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1601,6 +1642,7 @@ fun PlayerScreen(
 
         Spacer(Modifier.height(24.dp))
 
+        // Название и артист.
         Text(
             text = song?.title ?: "Ничего не играет",
             color = colors.textPrimary,
@@ -1621,6 +1663,7 @@ fun PlayerScreen(
 
         Spacer(Modifier.height(20.dp))
 
+        // Прогресс-бар трека + время.
         val safeDuration = if (durationMs > 0) durationMs else 1L
         Slider(
             value = positionMs.toFloat().coerceIn(0f, safeDuration.toFloat()),
@@ -1646,6 +1689,7 @@ fun PlayerScreen(
 
         Spacer(Modifier.height(12.dp))
 
+        // Ряд управления: shuffle | prev | play | next | repeat.
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,
@@ -1684,6 +1728,7 @@ fun PlayerScreen(
                 )
             }
             IconButton(onClick = onCycleRepeat, modifier = Modifier.size(48.dp)) {
+                // Иконка и цвет зависят от текущего режима повтора.
                 val icon = if (repeatMode == PlayerManager.REPEAT_ONE)
                     Icons.Filled.RepeatOne else Icons.Filled.Repeat
                 val tint = if (repeatMode == PlayerManager.REPEAT_OFF)
@@ -1697,6 +1742,7 @@ fun PlayerScreen(
             }
         }
 
+        // Отдельная строка с плюсиком — добавить в плейлист.
         Spacer(Modifier.height(8.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1718,6 +1764,7 @@ fun PlayerScreen(
 
         Spacer(Modifier.weight(1f))
 
+        // Ползунок громкости — показывается, если включено в настройках.
         if (showVolumeSlider) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1756,7 +1803,7 @@ fun PlayerScreen(
 }
 
 // ============================================================
-// ФОРМАТ ВРЕМЕНИ
+// ФОРМАТ ВРЕМЕНИ: 0:00 / 2:33
 // ============================================================
 fun formatTime(ms: Long): String {
     val totalSec = ms / 1000
