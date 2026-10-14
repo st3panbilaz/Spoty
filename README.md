@@ -43,4 +43,4 @@
 
 1. Склонируй репозиторий:
    ```bash
-   git clone https://github.com/[ТВОЙ_ЛОГИН]/Spoty.git
+   git clone https://github.com/St3panbilaz/Spoty.git
